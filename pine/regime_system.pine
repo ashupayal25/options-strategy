@@ -1,0 +1,258 @@
+//@version=5
+indicator("OTM Seller Regime System", overlay=true, max_labels_count=300)
+
+// Rules: regime from the daily candle, entry on the weekly entry day (day after expiry, about 30 minutes after the open).
+// Puts: 2% OTM, skip when prior-close RSI > 70, HOLD TO EXPIRY (no stop). Calls: 3% OTM, exit on regime change.
+// Hard kill (close beyond the short strike) is available but off by default.
+// Check the table at about 3:20 PM; the live candle is provisional until the close.
+// The 1H / 4H / 1D / 1W rows in the table are for context only. Signals use the chart (daily) regime.
+// Strikes: sell puts ~2% OTM (skip puts when prior-close RSI > 70), sell calls at least ~3% OTM. Hedge is further OTM for margin only.
+// Entry: the day after weekly expiry, about 30 minutes after the open, using the prior close regime and RSI.
+
+// ---- Inputs ----
+grpR = "Regime"
+adxLen      = input.int(14, "ADX length", group=grpR)
+adxSide     = input.float(20.0, "Sideways: ADX below", group=grpR)
+adxTrend    = input.float(20.0, "Trend: ADX above", group=grpR)
+distPct     = input.float(3.0, "Sideways: max % distance from SMA50 (daily)", group=grpR)
+slopeFlat   = input.float(0.7, "Sideways: max |SMA50 slope| % over 5 bars (daily)", group=grpR)
+bbwSideRank = input.float(70.0, "Sideways: BB width percentile below", group=grpR)
+squeezeRank = input.float(5.0, "Squeeze (no trade): BB width percentile below", group=grpR)
+confirmBars = input.int(2, "Closes needed to confirm a regime (1 = faster, more exits)", minval=1, group=grpR)
+
+grpT = "Trading"
+sellSideways = input.bool(false, "Sell both sides in a sideways regime (off by default)", group=grpT)
+entryDayStr  = input.string("Wednesday", "Weekly entry day (day after weekly expiry)", options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"], group=grpT)
+putOtmPct    = input.float(2.0, "Put short: % OTM from spot", step=0.1, group=grpT)
+rsiSkipOn    = input.bool(true, "Skip new put entries when the prior-close RSI is above the limit", group=grpT)
+rsiSkipAt    = input.float(70.0, "RSI limit for skipping put entries", group=grpT)
+callOtmPct   = input.float(3.0, "Call short: min % OTM from spot", step=0.1, group=grpT)
+hedgeExtra   = input.float(2.0, "Hedge: extra % beyond short (margin only)", step=0.1, group=grpT)
+strikeStep   = input.float(50.0, "Strike step", group=grpT)
+putRegimeExit  = input.bool(false, "Exit PUT legs on regime change (off = hold puts to expiry)", group=grpT)
+callRegimeExit = input.bool(true, "Exit CALL legs on regime change", group=grpT)
+hardKillOn   = input.bool(false, "Hard kill: exit if spot closes beyond short strike (off by default)", group=grpT)
+
+grpB = "Call block (advisory only — off by default)"
+blockOn      = input.bool(false, "Block calls after a sharp rally", group=grpB)
+rallyPct     = input.float(8.0, "Rally: gain % over the last N bars", step=0.5, group=grpB)
+rallyBars    = input.int(10, "Rally: N bars", minval=2, group=grpB)
+blockReclaim = input.bool(false, "Also block calls when close is above SMA20 and SMA20 is rising", group=grpB)
+exitOnBlock  = input.bool(false, "Exit open call legs when the block starts", group=grpB)
+
+grpM = "Multi-timeframe table"
+scaleTf = input.bool(true, "Scale distance/slope limits for 1H, 4H and 1W (daily limits are used as given)", group=grpM)
+
+entryDow = switch entryDayStr
+    "Monday" => dayofweek.monday
+    "Tuesday" => dayofweek.tuesday
+    "Wednesday" => dayofweek.wednesday
+    "Thursday" => dayofweek.thursday
+    => dayofweek.friday
+
+// ---- Regime function: 1 bullish, -1 bearish, 0 sideways, 9 no trade ----
+f_regime(int aLen, float aSide, float aTrend, float dist, float flat, float bbwSide, float sqz, int confirm) =>
+    [diP, diM, adxv] = ta.dmi(aLen, aLen)
+    s50  = ta.sma(close, 50)
+    s200 = ta.sma(close, 200)
+    slp  = (s50 - s50[5]) / s50[5] * 100
+    basis = ta.sma(close, 20)
+    width = 2 * 2 * ta.stdev(close, 20) / basis
+    rank  = ta.percentrank(width, 126)
+    squeezeNow = rank < sqz
+    bull = close > s50 and close > s200 and slp > 0 and adxv > aTrend
+    bear = close < s50 and close < s200 and slp < 0 and adxv > aTrend
+    side = adxv < aSide and math.abs(close / s50 - 1) * 100 <= dist and math.abs(slp) <= flat and rank <= bbwSide
+    raw = squeezeNow ? 9 : bull ? 1 : bear ? -1 : side ? 0 : 9
+    var int cand = 9
+    var int cnt  = 0
+    var int r    = 9
+    if raw == cand
+        cnt += 1
+    else
+        cand := raw
+        cnt := 1
+    if cnt >= confirm and cand != r
+        r := cand
+    r
+
+f_scale(string tf) =>
+    tf == "60" ? math.sqrt(60.0 / 375.0) : tf == "240" ? math.sqrt(240.0 / 375.0) : tf == "W" ? math.sqrt(5.0) : 1.0
+
+f_txt(int r) => r == 1 ? "BULLISH" : r == -1 ? "BEARISH" : r == 0 ? "SIDEWAYS" : "NO TRADE"
+f_col(int r) => r == 1 ? color.lime : r == -1 ? color.red : r == 0 ? color.aqua : color.gray
+f_tc(int r)  => r == 1 or r == 0 ? color.black : color.white
+f_short(int r) => r == 1 ? "BULL" : r == -1 ? "BEAR" : r == 0 ? "SIDE" : "NONE"
+f_dir(bool up, bool down) => up ? color.lime : down ? color.red : color.gray
+
+// ---- Chart-timeframe regime (drives the signals) ----
+int reg = f_regime(adxLen, adxSide, adxTrend, distPct, slopeFlat, bbwSideRank, squeezeRank, confirmBars)
+prev = nz(reg[1], 9)
+
+// ---- Other timeframes (context only) ----
+s1h = scaleTf ? f_scale("60") : 1.0
+s4h = scaleTf ? f_scale("240") : 1.0
+s1w = scaleTf ? f_scale("W") : 1.0
+int reg1h = request.security(syminfo.tickerid, "60",  f_regime(adxLen, adxSide, adxTrend, distPct * s1h, slopeFlat * s1h, bbwSideRank, squeezeRank, confirmBars))
+int reg4h = request.security(syminfo.tickerid, "240", f_regime(adxLen, adxSide, adxTrend, distPct * s4h, slopeFlat * s4h, bbwSideRank, squeezeRank, confirmBars))
+int reg1d = request.security(syminfo.tickerid, "D",   f_regime(adxLen, adxSide, adxTrend, distPct, slopeFlat, bbwSideRank, squeezeRank, confirmBars))
+int reg1w = request.security(syminfo.tickerid, "W",   f_regime(adxLen, adxSide, adxTrend, distPct * s1w, slopeFlat * s1w, bbwSideRank, squeezeRank, confirmBars))
+
+// ---- Display values ----
+[diPd, diMd, adx] = ta.dmi(adxLen, adxLen)
+sma50  = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+slope50 = (sma50 - sma50[5]) / sma50[5] * 100
+bbMid  = ta.sma(close, 20)
+bbUp   = bbMid + 2 * ta.stdev(close, 20)
+bbLow  = bbMid - 2 * ta.stdev(close, 20)
+rsi    = ta.rsi(close, 14)
+vix    = request.security("NSE:INDIAVIX", "D", close)
+vixAvg = request.security("NSE:INDIAVIX", "D", ta.sma(close, 50))
+
+// ---- Weekly entry day: first bar of the week on or after the entry weekday ----
+newWeek = ta.change(time("W")) != 0
+var bool taken = false
+if newWeek
+    taken := false
+bool isEntryDay = false
+if not taken and dayofweek >= entryDow
+    isEntryDay := true
+    taken := true
+
+// ---- Call block: advisory only by default ----
+rallyGain = (close / close[rallyBars] - 1) * 100
+sma20 = ta.sma(close, 20)
+callBlock = blockOn and (rallyGain >= rallyPct or (blockReclaim and close > sma20 and sma20 > sma20[1]))
+callBlockStart = callBlock and not callBlock[1]
+
+// Entry is decided in the morning of the entry day, so it uses the prior close (regime and RSI).
+regE = nz(reg[1], 9)
+rsiE = nz(rsi[1], 50)
+rsiSkipPut = rsiSkipOn and rsiE > rsiSkipAt
+putEntry  = isEntryDay and ((regE == 1 and not rsiSkipPut) or (regE == 0 and sellSideways))
+callEntry = isEntryDay and not callBlock[1] and (regE == -1 or (regE == 0 and sellSideways))
+
+// ---- Strike guide: puts ~2% OTM, calls at least ~3% OTM ----
+f_strikes(float px) =>
+    ps = math.floor(px * (1 - putOtmPct / 100) / strikeStep) * strikeStep
+    ph = math.floor(ps * (1 - hedgeExtra / 100) / strikeStep) * strikeStep
+    cs = math.ceil(px * (1 + callOtmPct / 100) / strikeStep) * strikeStep
+    ch = math.ceil(cs * (1 + hedgeExtra / 100) / strikeStep) * strikeStep
+    [ps, ph, cs, ch]
+
+[putGuide, putHedge, callGuide, callHedge] = f_strikes(close)
+[putEntryStrike, putEntryHedge, callEntryStrike, callEntryHedge] = f_strikes(nz(close[1], close))
+
+// ---- Exits: regime change, optional call-block exit, or hard kill past short strike ----
+var bool putOpen  = false
+var bool callOpen = false
+var float putStrike  = na
+var float callStrike = na
+
+hardKillPut  = hardKillOn and putOpen and not na(putStrike) and close <= putStrike
+hardKillCall = hardKillOn and callOpen and not na(callStrike) and close >= callStrike
+
+putRegimeHit  = (reg == -1 and (prev == 0 or prev == 1)) or (reg == 9 and prev != 9)
+callRegimeHit = (reg == 1 and (prev == 0 or prev == -1)) or (reg == 9 and prev != 9)
+exitPut  = putOpen and not isEntryDay and ((putRegimeExit and putRegimeHit) or hardKillPut)
+exitCall = callOpen and not isEntryDay and ((callRegimeExit and callRegimeHit) or (exitOnBlock and callBlockStart) or hardKillCall)
+if exitPut
+    putOpen := false
+    putStrike := na
+if exitCall
+    callOpen := false
+    callStrike := na
+if isEntryDay
+    putOpen := putEntry
+    callOpen := callEntry
+    putStrike := putEntry ? putEntryStrike : na
+    callStrike := callEntry ? callEntryStrike : na
+
+// ---- Plots ----
+bg = reg == 1 ? color.new(color.lime, 78) : reg == -1 ? color.new(color.red, 72) : reg == 0 ? color.new(color.aqua, 78) : color.new(color.gray, 82)
+bgcolor(bg)
+plot(sma50, "SMA50", color.orange)
+plot(sma200, "SMA200", color.purple)
+plot(putOpen ? putStrike : na, "Open put short", color.lime, style=plot.style_linebr)
+plot(callOpen ? callStrike : na, "Open call short", color.red, style=plot.style_linebr)
+bothEntry = putEntry and callEntry
+plotshape(putEntry and not bothEntry, "Sell put side", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(callEntry and not bothEntry, "Sell call side", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(bothEntry, "Sell both sides", shape.diamond, location.belowbar, color.aqua, size=size.small)
+plotshape(exitPut and not hardKillPut, "Exit put legs", shape.xcross, location.belowbar, color.white, size=size.small)
+plotshape(exitCall and not hardKillCall, "Exit call legs", shape.xcross, location.abovebar, color.white, size=size.small)
+plotshape(hardKillPut, "Hard kill put", shape.xcross, location.belowbar, color.yellow, size=size.normal)
+plotshape(hardKillCall, "Hard kill call", shape.xcross, location.abovebar, color.yellow, size=size.normal)
+plotshape(callBlockStart, "Call block starts", shape.flag, location.abovebar, color.orange, text="NO CALLS", size=size.tiny)
+
+// ---- Table ----
+var table t = table.new(position.bottom_right, 5, 13, bgcolor=color.black, frame_color=color.white, frame_width=1, border_color=color.gray, border_width=1)
+f_cell(int c, int r, string txt, color bgc, color tc) =>
+    table.cell(t, c, r, txt, text_color=tc, text_size=size.small, bgcolor=bgc)
+
+if barstate.isfirst
+    for r in array.from(0, 1, 2, 3, 6, 9, 10, 11, 12)
+        table.merge_cells(t, 1, r, 4, r)
+
+if barstate.islast
+    action = regE == 1 ? (rsiSkipPut ? "Bullish, but RSI " + str.tostring(rsiE, "#") + " > " + str.tostring(rsiSkipAt, "#") + ": SKIP puts" : "Sell PUT side (hold to expiry)") : regE == -1 ? "Sell CALL side (exit on regime change)" : regE == 0 ? (sellSideways ? "Sell BOTH sides" : "Stay out") : "No new trades"
+    bulls = (reg1h == 1 ? 1 : 0) + (reg4h == 1 ? 1 : 0) + (reg1d == 1 ? 1 : 0) + (reg1w == 1 ? 1 : 0)
+    bears = (reg1h == -1 ? 1 : 0) + (reg4h == -1 ? 1 : 0) + (reg1d == -1 ? 1 : 0) + (reg1w == -1 ? 1 : 0)
+    sides = (reg1h == 0 ? 1 : 0) + (reg4h == 0 ? 1 : 0) + (reg1d == 0 ? 1 : 0) + (reg1w == 0 ? 1 : 0)
+    align = bulls == 4 ? "ALL BULLISH" : bears == 4 ? "ALL BEARISH" : sides == 4 ? "ALL SIDEWAYS" : str.tostring(bulls) + " bull / " + str.tostring(bears) + " bear / " + str.tostring(sides) + " side"
+    alignCol = bulls == 4 ? color.lime : bears == 4 ? color.red : sides == 4 ? color.aqua : color.white
+    anyExit = exitPut or exitCall
+    hardTxt = (hardKillPut ? "PUT HARD KILL" : "") + (hardKillPut and hardKillCall ? " / " : "") + (hardKillCall ? "CALL HARD KILL" : "")
+
+    f_cell(0, 0, "Regime (chart)", color.black, color.white)
+    f_cell(1, 0, f_txt(reg), f_col(reg), f_tc(reg))
+    f_cell(0, 1, "Entry-day action (prior close)", color.black, color.white)
+    f_cell(1, 1, action + (callBlock ? "   |   CALLS BLOCKED" : ""), callBlock ? color.new(color.red, 40) : color.black, color.white)
+    f_cell(0, 2, "Entry / Puts / Calls", color.black, color.white)
+    f_cell(1, 2, "Entry day: " + (isEntryDay ? "YES" : "no") + "  |  Put legs open: " + (putOpen ? "yes" : "no") + "  |  Call legs open: " + (callOpen ? "yes" : "no"), color.black, color.white)
+    f_cell(0, 3, "Exit today", color.black, color.white)
+    f_cell(1, 3, "Puts: " + (exitPut ? (hardKillPut ? "HARD KILL" : "EXIT") : "no") + "  |  Calls: " + (exitCall ? (hardKillCall ? "HARD KILL" : "EXIT") : "no") + (hardTxt != "" ? "  |  " + hardTxt : ""), anyExit ? color.red : color.black, color.white)
+
+    f_cell(0, 4, "Timeframe", color.new(color.blue, 40), color.white)
+    f_cell(1, 4, "1H", color.new(color.blue, 40), color.white)
+    f_cell(2, 4, "4H", color.new(color.blue, 40), color.white)
+    f_cell(3, 4, "1D", color.new(color.blue, 40), color.white)
+    f_cell(4, 4, "1W", color.new(color.blue, 40), color.white)
+    f_cell(0, 5, "Regime", color.black, color.white)
+    f_cell(1, 5, f_short(reg1h), f_col(reg1h), f_tc(reg1h))
+    f_cell(2, 5, f_short(reg4h), f_col(reg4h), f_tc(reg4h))
+    f_cell(3, 5, f_short(reg1d), f_col(reg1d), f_tc(reg1d))
+    f_cell(4, 5, f_short(reg1w), f_col(reg1w), f_tc(reg1w))
+    f_cell(0, 6, "Alignment", color.black, color.white)
+    f_cell(1, 6, align, color.black, alignCol)
+
+    trendUp = adx >= adxTrend and diPd > diMd
+    trendDn = adx >= adxTrend and diMd > diPd
+    f_cell(0, 7, "Momentum (daily)", color.black, color.white)
+    f_cell(1, 7, "ADX " + str.tostring(adx, "#.0") + (trendUp ? " up" : trendDn ? " down" : " flat"), color.black, f_dir(trendUp, trendDn))
+    f_cell(2, 7, "RSI " + str.tostring(rsi, "#.0") + (rsi > 70 ? " OB" : rsi < 30 ? " OS" : ""), color.black, f_dir(rsi > 50, rsi < 50))
+    f_cell(3, 7, "VIX " + str.tostring(vix, "#.0") + (vix < vixAvg ? " <avg" : " >avg"), color.black, f_dir(vix < vixAvg, vix > vixAvg))
+    f_cell(4, 7, close > bbUp ? "Above upper BB" : close < bbLow ? "Below lower BB" : close > bbMid ? "Above mid BB" : "Below mid BB", color.black, f_dir(close > bbMid, close < bbMid))
+    f_cell(0, 8, "Trend (daily)", color.black, color.white)
+    f_cell(1, 8, close > sma50 ? "> SMA50" : "< SMA50", color.black, f_dir(close > sma50, close < sma50))
+    f_cell(2, 8, close > sma200 ? "> SMA200" : "< SMA200", color.black, f_dir(close > sma200, close < sma200))
+    f_cell(3, 8, slope50 > 0 ? "SMA50 rising" : "SMA50 falling", color.black, f_dir(slope50 > 0, slope50 < 0))
+    f_cell(4, 8, diPd > diMd ? "+DI > -DI" : "-DI > +DI", color.black, f_dir(diPd > diMd, diMd > diPd))
+
+    f_cell(0, 9, "Short / hedge guide", color.black, color.white)
+    f_cell(1, 9, "PE " + str.tostring(putGuide, "#") + " / hedge " + str.tostring(putHedge, "#") + "   |   CE " + str.tostring(callGuide, "#") + " / hedge " + str.tostring(callHedge, "#") + "   (put " + str.tostring(putOtmPct, "#.1") + "% / call " + str.tostring(callOtmPct, "#.1") + "% OTM)" + (timeframe.isdaily ? "" : "   (use 1D)"), color.black, color.white)
+    f_cell(0, 10, "Colours", color.black, color.white)
+    f_cell(1, 10, "Green bull | Red bear | Cyan sideways | Grey no trade", color.black, color.white)
+    f_cell(0, 11, "Markers", color.black, color.white)
+    f_cell(1, 11, "Up=puts  Down=calls  Diamond=both  White X=regime exit  Yellow X=hard kill  Flag=no calls", color.black, color.white)
+    f_cell(0, 12, "Call block", color.black, color.white)
+    f_cell(1, 12, (callBlock ? "ON - do not sell calls" : "off (advisory)") + "   (" + str.tostring(rallyGain, "#.0") + "% over " + str.tostring(rallyBars) + " bars, limit " + str.tostring(rallyPct, "#.0") + "%)", callBlock ? color.new(color.red, 40) : color.black, color.white)
+
+// ---- Alerts ----
+alertcondition(putEntry, "Entry: sell put side", "Entry day: sell ~4% OTM puts (hedged for margin)")
+alertcondition(callEntry, "Entry: sell call side", "Entry day: sell >=3% OTM calls (hedged for margin)")
+alertcondition(exitPut and not hardKillPut, "Exit put legs", "Regime changed: exit put legs")
+alertcondition(exitCall and not hardKillCall, "Exit call legs", "Regime change: exit call legs")
+alertcondition(hardKillPut or hardKillCall, "Hard kill", "Spot closed beyond short strike: flatten now")
+alertcondition(callBlockStart, "Call block starts", "Sharp rally: do not sell calls (advisory)")

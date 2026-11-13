@@ -1,0 +1,168 @@
+//@version=5
+indicator("OTM Seller Backtest", overlay=true, max_labels_count=200)
+
+// Measures, for each accepted entry, whether the underlying stayed inside the call/put strike levels
+// for the next H trading days. It does not price options or the hedge.
+
+// ---- Inputs ----
+grpR = "Regime"
+adxLen      = input.int(14, "ADX length", group=grpR)
+adxSide     = input.float(20.0, "Sideways: ADX below", group=grpR)
+adxTrend    = input.float(20.0, "Trend: ADX above", group=grpR)
+distPct     = input.float(3.0, "Sideways: max % distance from SMA50", group=grpR)
+slopeFlat   = input.float(0.7, "Sideways: max |SMA50 slope| % over 5 bars", group=grpR)
+bbwSideRank = input.float(70.0, "Sideways: BB width percentile below", group=grpR)
+squeezeRank = input.float(5.0, "Squeeze (no trade): BB width percentile below", group=grpR)
+confirmBars = input.int(2, "Closes needed to confirm a regime", minval=1, group=grpR)
+
+grpE = "Entry"
+rsiLen      = input.int(14, "RSI length", group=grpE)
+rsiSideLo   = input.float(40.0, "Sideways entry: RSI min", group=grpE)
+rsiSideHi   = input.float(60.0, "Sideways entry: RSI max", group=grpE)
+rsiBullFrom = input.float(50.0, "Bullish entry: RSI was at or below", group=grpE)
+rsiBearFrom = input.float(50.0, "Bearish entry: RSI was at or above", group=grpE)
+rsiOverHi   = input.float(70.0, "Overextended: RSI above", group=grpE)
+rsiOverLo   = input.float(30.0, "Overextended: RSI below", group=grpE)
+inclSide    = input.bool(true, "Include sideways entries (sell both sides)", group=grpE)
+inclBull    = input.bool(true, "Include bullish entries (sell puts)", group=grpE)
+inclBear    = input.bool(true, "Include bearish entries (sell calls)", group=grpE)
+
+grpP = "Strikes / test"
+ivOverride = input.float(0.0, "IV % override (0 = use India VIX)", group=grpP)
+dte        = input.int(7, "Calendar days to expiry (7 Nifty weekly, 35 stocks monthly)", minval=1, group=grpP)
+holdBars   = input.int(5, "Trading days held (5 weekly, 25 monthly)", minval=1, group=grpP)
+emMult     = input.float(1.2, "Short strike distance (x expected move)", step=0.1, group=grpP)
+vixFloor   = input.float(13.0, "Variant C: India VIX above this floor", group=grpP)
+
+// ---- Indicators ----
+[diP, diM, adx] = ta.dmi(adxLen, adxLen)
+sma20  = ta.sma(close, 20)
+sma50  = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+slope  = (sma50 - sma50[5]) / sma50[5] * 100
+
+bbBasis = ta.sma(close, 20)
+bbDev   = 2 * ta.stdev(close, 20)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbw     = (bbUpper - bbLower) / bbBasis
+bbwRank = ta.percentrank(bbw, 126)
+rsi     = ta.rsi(close, rsiLen)
+
+vix    = request.security("NSE:INDIAVIX", "D", close)
+vixAvg = request.security("NSE:INDIAVIX", "D", ta.sma(close, 50))
+iv     = ivOverride > 0 ? ivOverride : vix
+
+// ---- Regime (same rules as the indicator) ----
+squeeze  = bbwRank < squeezeRank
+isBull   = close > sma50 and close > sma200 and slope > 0 and adx > adxTrend
+isBear   = close < sma50 and close < sma200 and slope < 0 and adx > adxTrend
+isSide   = adx < adxSide and math.abs(close / sma50 - 1) * 100 <= distPct and math.abs(slope) <= slopeFlat and bbwRank <= bbwSideRank
+rawRegime = squeeze ? 9 : isBull ? 1 : isBear ? -1 : isSide ? 0 : 9
+
+var int cand = 9
+var int cnt  = 0
+var int reg  = 9
+if rawRegime == cand
+    cnt += 1
+else
+    cand := rawRegime
+    cnt := 1
+if cnt >= confirmBars and cand != reg
+    reg := cand
+
+overext   = close > bbUpper or close < bbLower or rsi > rsiOverHi or rsi < rsiOverLo
+sideBase  = inclSide and reg == 0 and not overext and rsi >= rsiSideLo and rsi <= rsiSideHi
+bullBase  = inclBull and reg == 1 and not overext and (low <= sma20 or low <= bbLower) and rsi[1] <= rsiBullFrom and rsi > rsi[1]
+bearBase  = inclBear and reg == -1 and not overext and (high >= sma20 or high >= bbUpper) and rsi[1] >= rsiBearFrom and rsi < rsi[1]
+baseSig   = (sideBase or bullBase or bearBase) and not na(vix) and not na(vixAvg)
+
+// legs sold on the signal bar: sideways = both, bullish = put only, bearish = call only
+needCall = sideBase or bearBase
+needPut  = sideBase or bullBase
+
+em      = close * iv / 100 * math.sqrt(dte / 365.0)
+callLvl = close + em * emMult
+putLvl  = close - em * emMult
+
+// ---- Entry acceptance: one entry per holding period for each variant ----
+var lastEntry = array.new_int(3, -1000)
+
+f_accept(int k, bool sig) =>
+    bool ok = false
+    if sig and bar_index - array.get(lastEntry, k) >= holdBars
+        array.set(lastEntry, k, bar_index)
+        ok := true
+    ok
+
+accA = f_accept(0, baseSig)
+accB = f_accept(1, baseSig and vix > vixAvg)
+accC = f_accept(2, baseSig and vix > vixFloor)
+
+// ---- Outcome evaluation, holdBars after each accepted entry ----
+// stats per variant (5 slots): 0 entries, 1 touched a level, 2 closed beyond a level, 3 sum breach %, 4 max breach %
+var stats = array.new_float(15, 0.0)
+
+f_eval(int k, bool acc, bool needC, bool needP, float callL, float putL, float ref, float hi, float lo, float cl) =>
+    if acc
+        int b = k * 5
+        bool touched = (needC and hi >= callL) or (needP and lo <= putL)
+        bool closedOut = (needC and cl >= callL) or (needP and cl <= putL)
+        float callB = needC ? (hi - callL) / ref * 100 : 0.0
+        float putB  = needP ? (putL - lo) / ref * 100 : 0.0
+        float breach = math.max(math.max(callB, putB), 0.0)
+        array.set(stats, b, array.get(stats, b) + 1)
+        if touched
+            array.set(stats, b + 1, array.get(stats, b + 1) + 1)
+            array.set(stats, b + 3, array.get(stats, b + 3) + breach)
+            array.set(stats, b + 4, math.max(array.get(stats, b + 4), breach))
+        if closedOut
+            array.set(stats, b + 2, array.get(stats, b + 2) + 1)
+
+accAi = accA ? 1 : 0
+accBi = accB ? 1 : 0
+accCi = accC ? 1 : 0
+callI = needCall ? 1 : 0
+putI  = needPut ? 1 : 0
+
+hiH = ta.highest(high, holdBars)
+loH = ta.lowest(low, holdBars)
+
+needCH = nz(callI[holdBars]) == 1
+needPH = nz(putI[holdBars]) == 1
+f_eval(0, nz(accAi[holdBars]) == 1, needCH, needPH, callLvl[holdBars], putLvl[holdBars], close[holdBars], hiH, loH, close)
+f_eval(1, nz(accBi[holdBars]) == 1, needCH, needPH, callLvl[holdBars], putLvl[holdBars], close[holdBars], hiH, loH, close)
+f_eval(2, nz(accCi[holdBars]) == 1, needCH, needPH, callLvl[holdBars], putLvl[holdBars], close[holdBars], hiH, loH, close)
+
+// ---- Plots ----
+bg = reg == 1 ? color.new(color.lime, 85) : reg == -1 ? color.new(color.red, 80) : reg == 0 ? color.new(color.aqua, 85) : color.new(color.gray, 88)
+bgcolor(bg)
+plot(sma50, "SMA50", color.orange)
+plot(sma200, "SMA200", color.purple)
+plotshape(accA, "Entry (variant A)", shape.diamond, location.belowbar, color.yellow, size=size.small)
+
+// ---- Results table ----
+var table t = table.new(position.bottom_right, 6, 6, bgcolor=color.black, frame_color=color.white, frame_width=1, border_color=color.gray, border_width=1)
+f_cell(int c, int r, string txt, color bgc) =>
+    table.cell(t, c, r, txt, text_color=color.white, text_size=size.normal, bgcolor=bgc)
+
+if barstate.islast
+    f_cell(0, 0, "Variant", color.black)
+    f_cell(1, 0, "Entries", color.black)
+    f_cell(2, 0, "Never touched %", color.black)
+    f_cell(3, 0, "Closed inside %", color.black)
+    f_cell(4, 0, "Avg breach %", color.black)
+    f_cell(5, 0, "Max breach %", color.black)
+    names = array.from("A: no VIX filter", "B: VIX > avg50", "C: VIX > floor")
+    for k = 0 to 2
+        int b = k * 5
+        float n = array.get(stats, b)
+        float touched = array.get(stats, b + 1)
+        float closedOut = array.get(stats, b + 2)
+        f_cell(0, k + 1, array.get(names, k), color.black)
+        f_cell(1, k + 1, str.tostring(n, "#"), color.black)
+        f_cell(2, k + 1, n > 0 ? str.tostring((n - touched) / n * 100, "#.0") : "-", color.black)
+        f_cell(3, k + 1, n > 0 ? str.tostring((n - closedOut) / n * 100, "#.0") : "-", color.black)
+        f_cell(4, k + 1, touched > 0 ? str.tostring(array.get(stats, b + 3) / touched, "#.00") : "-", color.black)
+        f_cell(5, k + 1, touched > 0 ? str.tostring(array.get(stats, b + 4), "#.00") : "-", color.black)
+    f_cell(0, 5, "Hold " + str.tostring(holdBars) + "d, strikes " + str.tostring(emMult, "#.0") + "x expected move over " + str.tostring(dte) + "d. Underlying only, no option pricing, no stops.", color.new(color.gray, 20))

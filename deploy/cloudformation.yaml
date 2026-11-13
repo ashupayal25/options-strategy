@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  OTM signal app (signal only, places no orders): one small EC2 instance with an Elastic IP, a private S3 bucket for
+  state, and an instance role that can read SSM parameters under a prefix. No inbound ports; use SSM Session Manager.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the instance (a default VPC works).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A PUBLIC subnet (route to an internet gateway) in that VPC. The instance needs outbound internet for Yahoo and Telegram.
+  RepoUrl:
+    Type: String
+    Description: HTTPS git URL of this repository, for example https://github.com/you/otm-strategy.git
+  RepoRef:
+    Type: String
+    Default: main
+    Description: Branch or tag to deploy.
+  GitTokenParameter:
+    Type: String
+    Default: ""
+    Description: Leave empty for a public repo. For a private repo, the name of an SSM SecureString holding a read-only access token (for example /otm-strategy/git/token).
+  SsmPrefix:
+    Type: String
+    Default: /otm-strategy
+    Description: SSM parameter prefix; the app reads <prefix>/telegram/bot_token and <prefix>/telegram/chat_id.
+  InstanceType:
+    Type: String
+    Default: t4g.micro
+    AllowedValues: [t4g.micro, t4g.small, t4g.medium]
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Amazon Linux 2023, ARM (matches the t4g instance family).
+
+Resources:
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-reports
+            Status: Enabled
+            Prefix: otm/reports/
+            ExpirationInDays: 365
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: otm-app
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListStatePrefix
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt StateBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: ["otm", "otm/*"]
+              - Sid: ReadWriteState
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub "${StateBucket.Arn}/otm/*"
+              - Sid: ReadAppParameters
+                Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmPrefix}/*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: OTM app - no inbound, all outbound
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - { Key: Name, Value: otm-signal-app }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y git python3.12 python3.12-pip
+          id otm >/dev/null 2>&1 || useradd --system --create-home --home-dir /opt/otm --shell /sbin/nologin otm
+          install -d -m 755 /etc/otm
+          cat > /etc/otm/otm.env <<'ENVEOF'
+          OTM_STORE=s3://${StateBucket}/otm/
+          OTM_SSM_PREFIX=${SsmPrefix}
+          AWS_DEFAULT_REGION=${AWS::Region}
+          PYTHONUNBUFFERED=1
+          ENVEOF
+          echo "${GitTokenParameter}" > /etc/otm/git_token_param
+          echo "${RepoUrl}" > /etc/otm/repo_url
+          echo "${RepoRef}" > /etc/otm/repo_ref
+          TOKEN_PARAM="${GitTokenParameter}"
+          AUTH_ARGS=()
+          if [ -n "$TOKEN_PARAM" ]; then
+            TOKEN=$(aws ssm get-parameter --name "$TOKEN_PARAM" --with-decryption --query Parameter.Value --output text --region ${AWS::Region})
+            HOST=$(echo "${RepoUrl}" | sed -E 's#^(https://[^/]+/).*#\1#')
+            AUTH_ARGS=(-c "http.$HOST.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)")
+          fi
+          rm -rf /opt/otm/app
+          git "${!AUTH_ARGS[@]}" clone --branch "${RepoRef}" "${RepoUrl}" /opt/otm/app
+          chown -R otm:otm /opt/otm
+          bash /opt/otm/app/deploy/bootstrap.sh
+
+  ElasticIpAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AppInstance
+
+Outputs:
+  StateBucketName:
+    Value: !Ref StateBucket
+  ElasticIp:
+    Description: Fixed public IP of the instance (whitelist this later if the broker API needs a static IP).
+    Value: !Ref ElasticIpAddress
+  InstanceId:
+    Value: !Ref AppInstance
+  OpenSession:
+    Value: !Sub "aws ssm start-session --target ${AppInstance} --region ${AWS::Region}"

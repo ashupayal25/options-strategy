@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the OTM entry report at 09:40 IST, Monday to Friday
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:40:00 Asia/Kolkata
+AccuracySec=10s
+Persistent=false
+Unit=otm-entry.service
+
+[Install]
+WantedBy=timers.target

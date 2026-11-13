@@ -1,0 +1,145 @@
+//@version=5
+indicator("OTM Seller Regime", overlay=true, max_labels_count=200)
+
+// ---- Inputs ----
+grpR = "Regime"
+adxLen      = input.int(14, "ADX length", group=grpR)
+adxSide     = input.float(20.0, "Sideways: ADX below", group=grpR)
+adxTrend    = input.float(20.0, "Trend: ADX above", group=grpR)
+distPct     = input.float(3.0, "Sideways: max % distance from SMA50", group=grpR)
+slopeFlat   = input.float(0.7, "Sideways: max |SMA50 slope| % over 5 bars", group=grpR)
+bbwSideRank = input.float(70.0, "Sideways: BB width percentile below", group=grpR)
+squeezeRank = input.float(5.0, "Squeeze (no trade): BB width percentile below", group=grpR)
+confirmBars = input.int(2, "Closes needed to confirm a regime", minval=1, group=grpR)
+
+grpE = "Entry"
+rsiLen   = input.int(14, "RSI length", group=grpE)
+rsiSideLo = input.float(40.0, "Sideways entry: RSI min", group=grpE)
+rsiSideHi = input.float(60.0, "Sideways entry: RSI max", group=grpE)
+rsiBullFrom = input.float(50.0, "Bullish entry: RSI was at or below", group=grpE)
+rsiBearFrom = input.float(50.0, "Bearish entry: RSI was at or above", group=grpE)
+rsiOverHi = input.float(70.0, "Overextended: RSI above", group=grpE)
+rsiOverLo = input.float(30.0, "Overextended: RSI below", group=grpE)
+
+grpP = "Premium / strikes"
+useVixFilter = input.bool(true, "Require India VIX above its 50-day average", group=grpP)
+ivOverride   = input.float(0.0, "IV % override (0 = use India VIX)", group=grpP)
+dte          = input.int(7, "Days to expiry (7 Nifty weekly, 35 stocks monthly)", minval=1, group=grpP)
+emMult       = input.float(1.2, "Short strike distance (x expected move)", step=0.1, group=grpP)
+
+// ---- Indicators ----
+[diP, diM, adx] = ta.dmi(adxLen, adxLen)
+sma20  = ta.sma(close, 20)
+sma50  = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+slope  = (sma50 - sma50[5]) / sma50[5] * 100
+
+bbBasis = ta.sma(close, 20)
+bbDev   = 2 * ta.stdev(close, 20)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbw     = (bbUpper - bbLower) / bbBasis
+bbwRank = ta.percentrank(bbw, 126)
+rsi     = ta.rsi(close, rsiLen)
+
+vix    = request.security("NSE:INDIAVIX", "D", close)
+vixAvg = request.security("NSE:INDIAVIX", "D", ta.sma(close, 50))
+iv     = ivOverride > 0 ? ivOverride : vix
+premiumOk = not useVixFilter or vix > vixAvg
+
+// ---- Raw regime: 1 bull, -1 bear, 0 sideways, 9 no trade ----
+squeeze  = bbwRank < squeezeRank
+isBull   = close > sma50 and close > sma200 and slope > 0 and adx > adxTrend
+isBear   = close < sma50 and close < sma200 and slope < 0 and adx > adxTrend
+isSide   = adx < adxSide and math.abs(close / sma50 - 1) * 100 <= distPct and math.abs(slope) <= slopeFlat and bbwRank <= bbwSideRank
+rawRegime = squeeze ? 9 : isBull ? 1 : isBear ? -1 : isSide ? 0 : 9
+
+// ---- Confirmed regime ----
+var int cand = 9
+var int cnt  = 0
+var int reg  = 9
+if rawRegime == cand
+    cnt += 1
+else
+    cand := rawRegime
+    cnt := 1
+if cnt >= confirmBars and cand != reg
+    reg := cand
+prev = nz(reg[1], 9)
+changed = reg != prev
+
+// ---- Entry signals (evaluated on the daily close) ----
+overext = close > bbUpper or close < bbLower or rsi > rsiOverHi or rsi < rsiOverLo
+sideEntry = reg == 0 and premiumOk and not overext and rsi >= rsiSideLo and rsi <= rsiSideHi
+bullEntry = reg == 1 and premiumOk and not overext and (low <= sma20 or low <= bbLower) and rsi[1] <= rsiBullFrom and rsi > rsi[1]
+bearEntry = reg == -1 and premiumOk and not overext and (high >= sma20 or high >= bbUpper) and rsi[1] >= rsiBearFrom and rsi < rsi[1]
+
+// ---- Exit flags on confirmed regime change ----
+exitCall = changed and ((prev == 0 and reg == 1) or (prev == -1 and reg == 1))
+exitPut  = changed and ((prev == 0 and reg == -1) or (prev == 1 and reg == -1))
+exitAll  = changed and reg == 9 and prev != 9
+
+// ---- Expected-move strike levels ----
+em      = close * iv / 100 * math.sqrt(dte / 365.0)
+callLvl = close + em * emMult
+putLvl  = close - em * emMult
+
+// ---- Plots ----
+bg = reg == 1 ? color.new(color.lime, 78) : reg == -1 ? color.new(color.red, 72) : reg == 0 ? color.new(color.aqua, 78) : reg == 9 ? color.new(color.gray, 82) : na
+bgcolor(bg)
+plot(sma20, "SMA20", color.new(color.gray, 40))
+plot(sma50, "SMA50", color.orange)
+plot(sma200, "SMA200", color.purple)
+plot(bbUpper, "BB upper", color.new(color.gray, 60))
+plot(bbLower, "BB lower", color.new(color.gray, 60))
+plot(callLvl, "Call strike level", color.new(color.red, 30), style=plot.style_linebr, show_last=10)
+plot(putLvl, "Put strike level", color.new(color.green, 30), style=plot.style_linebr, show_last=10)
+
+plotshape(sideEntry, "Sell both sides", shape.diamond, location.belowbar, color.blue, size=size.tiny)
+plotshape(bullEntry, "Sell puts", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(bearEntry, "Sell calls", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(exitCall, "Exit call leg", shape.xcross, location.abovebar, color.red, size=size.small)
+plotshape(exitPut, "Exit put leg", shape.xcross, location.belowbar, color.green, size=size.small)
+plotshape(exitAll, "Exit all", shape.xcross, location.abovebar, color.gray, size=size.small)
+
+// ---- Info table ----
+var table t = table.new(position.bottom_right, 2, 14, bgcolor=color.new(color.black, 0), frame_color=color.white, frame_width=1, border_color=color.gray, border_width=1)
+if barstate.islast
+    regTxt = reg == 1 ? "BULLISH" : reg == -1 ? "BEARISH" : reg == 0 ? "SIDEWAYS" : "NO TRADE"
+    regCol = reg == 1 ? color.lime : reg == -1 ? color.red : reg == 0 ? color.aqua : color.gray
+    table.cell(t, 0, 0, "Regime", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 0, regTxt, text_color=color.white, text_size=size.normal, bgcolor=regCol)
+    table.cell(t, 0, 1, "ADX", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 1, str.tostring(adx, "#.0"), text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 2, "RSI", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 2, str.tostring(rsi, "#.0"), text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 3, "BB width pct", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 3, str.tostring(bbwRank, "#"), text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 4, "India VIX / avg50", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 4, str.tostring(vix, "#.0") + " / " + str.tostring(vixAvg, "#.0"), text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 5, "Premium OK", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 5, premiumOk ? "yes" : "no", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 6, "Call / Put level", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 6, str.tostring(callLvl, "#") + " / " + str.tostring(putLvl, "#"), text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 7, "Daily chart?", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 7, timeframe.isdaily ? "yes" : "NO - use 1D", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 8, "Background", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 8, "Meaning", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 9, "Green", text_color=color.black, text_size=size.normal, bgcolor=color.lime)
+    table.cell(t, 1, 9, "Bullish: sell puts", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 10, "Red", text_color=color.white, text_size=size.normal, bgcolor=color.red)
+    table.cell(t, 1, 10, "Bearish: sell calls", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 11, "Cyan", text_color=color.black, text_size=size.normal, bgcolor=color.aqua)
+    table.cell(t, 1, 11, "Sideways: sell both", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 12, "Grey", text_color=color.white, text_size=size.normal, bgcolor=color.gray)
+    table.cell(t, 1, 12, "No trade", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 0, 13, "Markers", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+    table.cell(t, 1, 13, "Diamond=both, Up=puts, Down=calls, X=exit", text_color=color.white, text_size=size.normal, bgcolor=color.black)
+
+// ---- Alerts ----
+alertcondition(sideEntry, "Sideways entry", "Regime sideways: sell OTM call + put (hedged)")
+alertcondition(bullEntry, "Bullish entry", "Regime bullish: sell OTM put spread")
+alertcondition(bearEntry, "Bearish entry", "Regime bearish: sell OTM call spread")
+alertcondition(exitCall, "Exit call leg", "Regime turned bullish: exit call side")
+alertcondition(exitPut, "Exit put leg", "Regime turned bearish: exit put side")
+alertcondition(exitAll, "Exit all", "Regime no trade: close all")

@@ -1,0 +1,12 @@
+[Unit]
+Description=Nifty OTM signal report (entry run, sends Telegram)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=otm
+WorkingDirectory=/opt/otm/app
+EnvironmentFile=/etc/otm/otm.env
+ExecStart=/opt/otm/venv/bin/otm report --notify --phase entry
+TimeoutStartSec=300

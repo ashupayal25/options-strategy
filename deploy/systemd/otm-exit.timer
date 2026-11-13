@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the OTM exit report at 15:20 IST, Monday to Friday
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:20:00 Asia/Kolkata
+AccuracySec=10s
+Persistent=false
+Unit=otm-exit.service
+
+[Install]
+WantedBy=timers.target
