@@ -26,7 +26,7 @@ research/           backtests and experiments (they import the same regime engin
 pine/               TradingView script (regime_system.pine) and older versions
 docs/               strategy spec
 tests/              pytest suite
-deploy/             AWS CloudFormation, systemd timers, bootstrap/update scripts (see deploy/README.md)
+deploy/             GitHub Actions guide + optional AWS CloudFormation/systemd (see deploy/github-actions.md)
 data/ outputs/ reports/   local data, generated results and reports (git-ignored)
 ```
 
@@ -59,7 +59,7 @@ otm notify-test                              # send a test Telegram message
 
 Messages: the entry ticket (entry run), exit alerts (always, with sound), a short daily summary (3:20 PM run, skipped on market holidays),
 and an error alert if a run fails. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the environment, or store them in AWS SSM
-(`OTM_SSM_PREFIX`, see `deploy/README.md`). The token is never logged. Test with `otm notify-test`.
+(`OTM_SSM_PREFIX`, see `deploy/README.md`), or as GitHub Actions secrets (see `deploy/github-actions.md`). The token is never logged. Test with `otm notify-test`.
 
 ## Settings
 
@@ -81,5 +81,7 @@ python research/final_rules.py      # example backtest; results are written to o
 
 ## Deploying
 
-See `deploy/README.md`: one small EC2 instance with an Elastic IP, a private S3 bucket for state, secrets in SSM Parameter Store,
-and two systemd timers in IST.
+**Recommended (free):** GitHub Actions — two weekday cron jobs in IST, Telegram secrets in the repo, state in `state/`.  
+Setup: [deploy/github-actions.md](deploy/github-actions.md).
+
+**Optional (AWS):** [deploy/README.md](deploy/README.md) — EC2 + S3 + SSM, useful later if you need a static IP for a broker API.

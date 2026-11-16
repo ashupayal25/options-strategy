@@ -21,13 +21,13 @@ dist/
 data/*
 !data/.gitkeep
 outputs/
-reports/
 *.log
 *.zip
 
-# App state (positions are kept in S3 on AWS, locally in this file)
-positions.json
-cache/
+# Local app state at the repo root (CI keeps the same files under state/, which is tracked)
+/positions.json
+/cache/
+/reports/
 
 # Backups and editor files
 *.bak

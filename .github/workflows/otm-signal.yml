@@ -1,0 +1,85 @@
+# Runs the OTM signal app twice on weekdays (IST) and can also be started by hand.
+# Secrets required: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# State (positions.json, Yahoo cache) is kept in state/ and committed back after each run.
+
+name: OTM signal
+
+on:
+  schedule:
+    # GitHub cron is UTC. IST = UTC+5:30 (no DST).
+    - cron: "10 4 * * 1-5"   # 09:40 IST Mon–Fri → entry run
+    - cron: "50 9 * * 1-5"   # 15:20 IST Mon–Fri → exit run
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "Which run to execute"
+        required: true
+        type: choice
+        options:
+          - entry
+          - exit
+          - notify-test
+        default: notify-test
+
+permissions:
+  contents: write
+
+concurrency:
+  group: otm-signal
+  cancel-in-progress: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve phase
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "phase=${{ inputs.phase }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "10 4 * * 1-5" ]; then
+            echo "phase=entry" >> "$GITHUB_OUTPUT"
+          else
+            echo "phase=exit" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install app
+        run: pip install -e .
+
+      - name: Ensure state folder
+        run: mkdir -p state
+
+      - name: Run notify-test
+        if: steps.meta.outputs.phase == 'notify-test'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OTM_STORE: ${{ github.workspace }}/state
+        run: otm notify-test
+
+      - name: Run report
+        if: steps.meta.outputs.phase != 'notify-test'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OTM_STORE: ${{ github.workspace }}/state
+        run: otm report --notify --phase "${{ steps.meta.outputs.phase }}"
+
+      - name: Persist state
+        if: always() && steps.meta.outputs.phase != 'notify-test'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "ci: update otm state (${{ steps.meta.outputs.phase }})"
+          file_pattern: state/*
+          commit_user_name: otm-bot
+          commit_user_email: otm-bot@users.noreply.github.com
