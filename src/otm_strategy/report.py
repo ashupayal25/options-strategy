@@ -4,8 +4,9 @@ from datetime import datetime
 
 import pandas as pd
 
+from .chain import ChainError
 from .regime import RegimeParams, build
-from .strategy import NAMES, first_call_exit, is_entry_day, next_expiry, strikes, symbol
+from .strategy import NAMES, delta_put_strikes, first_call_exit, is_entry_day, next_expiry, strikes, symbol
 
 
 @dataclass
@@ -23,7 +24,7 @@ class Report:
     entry_day: bool = False
 
 
-def build_report(today, cfg, nifty, vix, positions, *, entry_day="auto", spot=None, expiry=None, now=None, notes=()):
+def build_report(today, cfg, nifty, vix, positions, *, entry_day="auto", spot=None, expiry=None, put_chain=None, chain_fetcher=None, now=None, notes=()):
     p = RegimeParams(confirm=cfg.confirm)
     df_done = build(nifty[nifty.index.date < today], vix[vix.index.date < today], p)
     df_live = build(nifty[nifty.index.date <= today], vix[vix.index.date <= today], p)
@@ -68,7 +69,26 @@ def build_report(today, cfg, nifty, vix, positions, *, entry_day="auto", spot=No
         else:
             A.append("-> NO TRADE regime: no new position.")
         if side:
-            short, hedge = strikes(ref, side, cfg)
+            chain, why = put_chain, ""
+            if side == "PE" and not chain and chain_fetcher:
+                try:
+                    chain, live_spot, used = chain_fetcher(exp)
+                    if used != exp:
+                        A.append(f"NSE lists the weekly expiry as {used} (holiday shift), not {exp}: using {used}.")
+                        exp = used
+                    if not spot:
+                        ref = live_spot
+                        A.append(f"Put strikes use the live spot {ref:,.1f} from the NSE option chain.")
+                except ChainError as e:
+                    why = f" ({e})"
+            pick = delta_put_strikes(chain, ref, (exp - today).days, cfg) if side == "PE" and chain else None
+            if pick:
+                short, hedge, dl = pick
+                A.append(f"Put short chosen from the option chain: delta {dl:.3f} (target {cfg.put_delta / 100:.2f}), spot {ref:,.1f}, {(exp - today).days} days to expiry")
+            else:
+                short, hedge = strikes(ref, side, cfg)
+                if side == "PE":
+                    A.append(f"No usable option chain: put short is the fixed {cfg.put_otm:.0f}% fallback, not the tested {cfg.put_delta:.0f}-delta rule{why}. Check the chain by hand or pass --chain.")
             name = "PUT spread (bull put)" if side == "PE" else "CALL spread (bear call)"
             A += [f"-> {name}, {cfg.lots} lots x {cfg.lot_size} = {qty} units",
                   f"   1) BUY  {qty} {symbol(exp, hedge, side)}   (hedge, margin relief; place first, limit order)",
@@ -77,7 +97,7 @@ def build_report(today, cfg, nifty, vix, positions, *, entry_day="auto", spot=No
                   "   Before placing: check the short strike has open interest and a tight bid-ask, check the basket margin in Kite, and confirm the symbol and expiry in the chain.",
                   ("   Exit rule: HOLD TO EXPIRY (no stop). If Nifty closes below the hedge strike the loss is capped at (width - credit) x %d = about Rs %s before the credit." %
                    (qty, f"{abs(short - hedge) * qty:,.0f}")) if side == "PE" else
-                  "   Exit rule: exit BOTH legs if the regime turns bullish or no-trade (checked at 3:20 PM each day).",
+                  "   Exit rule: exit BOTH legs if Nifty closes above its SMA50 (checked at 3:20 PM each day).",
                   f"   After you trade, record it:  otm record --side {side} --short {short} --hedge {hedge} --expiry {exp} --lots {cfg.lots}"]
     L += A + [""]
 
@@ -105,10 +125,10 @@ def build_report(today, cfg, nifty, vix, positions, *, entry_day="auto", spot=No
             pl.append("   HOLD (puts are held to expiry; no exit rule). Hedge caps the loss.")
             status.append(f"#{r['id']} PUT {r['short']}/{r['hedge']}: hold ({dist:+.1f}% vs short)")
         else:
-            flip = first_call_exit(df_live.reg, entered)
+            flip = first_call_exit(df_live, entered)
             if flip is not None:
                 n = r["lots"] * cfg.lot_size
-                pl += [f"   >>> EXIT NOW: regime change on {flip.date()} ({NAMES[int(df_live.reg.loc[flip])]}).",
+                pl += [f"   >>> EXIT NOW: Nifty closed above SMA50 on {flip.date()} ({df_live.Close.loc[flip]:,.1f} vs {df_live.sma50.loc[flip]:,.1f}).",
                        f"       1) BUY BACK {n} {symbol(exp, r['short'], 'CE')}  (short)",
                        f"       2) SELL     {n} {symbol(exp, r['hedge'], 'CE')}  (hedge)",
                        f"       then:  otm close --id {r['id']}"]
@@ -116,7 +136,7 @@ def build_report(today, cfg, nifty, vix, positions, *, entry_day="auto", spot=No
                 status.append(f"#{r['id']} CALL {r['short']}/{r['hedge']}: EXIT")
                 exit_count += 1
             else:
-                pl.append("   HOLD (no regime exit yet).")
+                pl.append("   HOLD (Nifty has not closed above SMA50 yet).")
                 status.append(f"#{r['id']} CALL {r['short']}/{r['hedge']}: hold ({dist:+.1f}% vs short)")
         L += pl
     L += ["", "Notes: the rules were backtested with settlement-price fills, not live fills; paper trade and compare. Not financial advice."]

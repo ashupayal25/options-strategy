@@ -2,7 +2,8 @@
 indicator("OTM Seller Regime System", overlay=true, max_labels_count=300)
 
 // Rules: regime from the daily candle, entry on the weekly entry day (day after expiry, about 30 minutes after the open).
-// Puts: 2% OTM, skip when prior-close RSI > 70, HOLD TO EXPIRY (no stop). Calls: 3% OTM, exit on regime change.
+// Puts: 15 delta from the option chain (the app does this; Pine has no chain, so the table shows a 2% fallback guide), skip when prior-close RSI > 70, HOLD TO EXPIRY.
+// Calls: 3% OTM, exit when close is above SMA50.
 // Hard kill (close beyond the short strike) is available but off by default.
 // Check the table at about 3:20 PM; the live candle is provisional until the close.
 // The 1H / 4H / 1D / 1W rows in the table are for context only. Signals use the chart (daily) regime.
@@ -30,7 +31,8 @@ callOtmPct   = input.float(3.0, "Call short: min % OTM from spot", step=0.1, gro
 hedgeExtra   = input.float(2.0, "Hedge: extra % beyond short (margin only)", step=0.1, group=grpT)
 strikeStep   = input.float(50.0, "Strike step", group=grpT)
 putRegimeExit  = input.bool(false, "Exit PUT legs on regime change (off = hold puts to expiry)", group=grpT)
-callRegimeExit = input.bool(true, "Exit CALL legs on regime change", group=grpT)
+callRegimeExit = input.bool(false, "Exit CALL legs on regime change (off: calls exit on close above SMA50)", group=grpT)
+callSmaExit   = input.bool(true, "Exit CALL legs when close is above SMA50", group=grpT)
 hardKillOn   = input.bool(false, "Hard kill: exit if spot closes beyond short strike (off by default)", group=grpT)
 
 grpB = "Call block (advisory only — off by default)"
@@ -156,7 +158,7 @@ hardKillCall = hardKillOn and callOpen and not na(callStrike) and close >= callS
 putRegimeHit  = (reg == -1 and (prev == 0 or prev == 1)) or (reg == 9 and prev != 9)
 callRegimeHit = (reg == 1 and (prev == 0 or prev == -1)) or (reg == 9 and prev != 9)
 exitPut  = putOpen and not isEntryDay and ((putRegimeExit and putRegimeHit) or hardKillPut)
-exitCall = callOpen and not isEntryDay and ((callRegimeExit and callRegimeHit) or (exitOnBlock and callBlockStart) or hardKillCall)
+exitCall = callOpen and not isEntryDay and ((callRegimeExit and callRegimeHit) or (callSmaExit and close > sma50) or (exitOnBlock and callBlockStart) or hardKillCall)
 if exitPut
     putOpen := false
     putStrike := na
@@ -196,7 +198,7 @@ if barstate.isfirst
         table.merge_cells(t, 1, r, 4, r)
 
 if barstate.islast
-    action = regE == 1 ? (rsiSkipPut ? "Bullish, but RSI " + str.tostring(rsiE, "#") + " > " + str.tostring(rsiSkipAt, "#") + ": SKIP puts" : "Sell PUT side (hold to expiry)") : regE == -1 ? "Sell CALL side (exit on regime change)" : regE == 0 ? (sellSideways ? "Sell BOTH sides" : "Stay out") : "No new trades"
+    action = regE == 1 ? (rsiSkipPut ? "Bullish, but RSI " + str.tostring(rsiE, "#") + " > " + str.tostring(rsiSkipAt, "#") + ": SKIP puts" : "Sell PUT side (hold to expiry)") : regE == -1 ? "Sell CALL side (exit on close above SMA50)" : regE == 0 ? (sellSideways ? "Sell BOTH sides" : "Stay out") : "No new trades"
     bulls = (reg1h == 1 ? 1 : 0) + (reg4h == 1 ? 1 : 0) + (reg1d == 1 ? 1 : 0) + (reg1w == 1 ? 1 : 0)
     bears = (reg1h == -1 ? 1 : 0) + (reg4h == -1 ? 1 : 0) + (reg1d == -1 ? 1 : 0) + (reg1w == -1 ? 1 : 0)
     sides = (reg1h == 0 ? 1 : 0) + (reg4h == 0 ? 1 : 0) + (reg1d == 0 ? 1 : 0) + (reg1w == 0 ? 1 : 0)

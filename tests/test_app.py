@@ -7,6 +7,7 @@ from otm_strategy.config import Settings
 from otm_strategy.data import DataError, load_market
 from otm_strategy.report import Event, Report, build_report
 from otm_strategy.storage import LocalStore
+from otm_strategy.strategy import _bs_put
 from conftest import FakeNotifier, make_frames
 
 TODAY = date(2026, 11, 16)  # the business day after the last synthetic bar (13 Nov)
@@ -22,12 +23,42 @@ def test_bullish_without_rsi_skip_gives_a_put_ticket(uptrend):
     rep = build_report(TODAY, Settings(rsi_skip=200.0), *uptrend, [], entry_day="yes", expiry="2026-11-24")
     assert "PUT spread (bull put), 2 lots x 65 = 130 units" in rep.text
     assert "1) BUY  130" in rep.text and "2) SELL 130" in rep.text and rep.text.index("1) BUY") < rep.text.index("2) SELL")
-    assert "HOLD TO EXPIRY" in rep.text and "otm record --side PE" in rep.text
+    assert "HOLD TO EXPIRY" in rep.text and "otm record --side PE" in rep.text and "fixed 2% fallback" in rep.text
+
+
+def test_put_ticket_uses_the_chain_delta_when_given(uptrend):
+    spot = float(uptrend[0].Close.iloc[-1])
+    chain = {k: _bs_put(spot, k, 8 / 365, 0.14) for k in range(int(spot * 0.9) // 50 * 50, int(spot), 50)}
+    rep = build_report(TODAY, Settings(rsi_skip=200.0), *uptrend, [], entry_day="yes", expiry="2026-11-24", put_chain=chain)
+    assert "Put short chosen from the option chain: delta" in rep.text and "fallback" not in rep.text
+
+
+def test_put_ticket_fetches_the_chain_and_uses_its_spot(uptrend):
+    spot = float(uptrend[0].Close.iloc[-1]) * 1.01
+    chain = {k: _bs_put(spot, k, 8 / 365, 0.14) for k in range(int(spot * 0.9) // 50 * 50, int(spot), 50)}
+    rep = build_report(TODAY, Settings(rsi_skip=200.0), *uptrend, [], entry_day="yes", expiry="2026-11-24", chain_fetcher=lambda exp: (chain, spot, exp))
+    assert f"live spot {spot:,.1f} from the NSE option chain" in rep.text and "chosen from the option chain" in rep.text
+
+
+def test_put_ticket_follows_a_holiday_shifted_expiry(uptrend):
+    spot = float(uptrend[0].Close.iloc[-1])
+    chain = {k: _bs_put(spot, k, 8 / 365, 0.14) for k in range(int(spot * 0.9) // 50 * 50, int(spot), 50)}
+    rep = build_report(TODAY, Settings(rsi_skip=200.0), *uptrend, [], entry_day="yes", expiry="2026-11-24", chain_fetcher=lambda exp: (chain, spot, date(2026, 11, 23)))
+    assert "NSE lists the weekly expiry as 2026-11-23" in rep.text and "NIFTY26N23" in rep.text
+
+
+def test_put_ticket_falls_back_with_the_reason_when_the_fetch_fails(uptrend):
+    from otm_strategy.chain import ChainError
+
+    def broken(exp):
+        raise ChainError("NSE option chain unavailable (HTTPError)")
+    rep = build_report(TODAY, Settings(rsi_skip=200.0), *uptrend, [], entry_day="yes", expiry="2026-11-24", chain_fetcher=broken)
+    assert "fixed 2% fallback" in rep.text and "NSE option chain unavailable (HTTPError)" in rep.text
 
 
 def test_bearish_gives_a_call_ticket(downtrend):
     rep = build_report(TODAY, Settings(), *downtrend, [], entry_day="yes", expiry="2026-11-24")
-    assert "CALL spread (bear call)" in rep.text and "exit BOTH legs if the regime turns bullish or no-trade" in rep.text
+    assert "CALL spread (bear call)" in rep.text and "exit BOTH legs if Nifty closes above its SMA50" in rep.text
 
 
 def test_not_an_entry_day_has_no_ticket(uptrend):

@@ -135,6 +135,7 @@ Resources:
           cat > /etc/otm/otm.env <<'ENVEOF'
           OTM_STORE=s3://${StateBucket}/otm/
           OTM_SSM_PREFIX=${SsmPrefix}
+          OTM_LOTS=1
           AWS_DEFAULT_REGION=${AWS::Region}
           PYTHONUNBUFFERED=1
           ENVEOF

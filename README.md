@@ -11,10 +11,10 @@ the positions you have recorded. Messages go to Telegram. **It places no orders 
 | | Puts (bullish regime) | Calls (bearish regime) |
 |---|---|---|
 | Entry | day after weekly expiry, about 30 minutes after the open, decided from the prior close | same |
-| Short strike | 2% below the prior close | 3% above the prior close |
+| Short strike | 15 delta put from the NSE option chain (fetched automatically); fixed 2% below the prior close if the fetch fails | 3% above the prior close |
 | Hedge (margin relief only) | 2% beyond the short | 2% beyond the short |
 | Skip rule | skip when the prior-close RSI is above 70 | none |
-| Exit | hold to expiry (no stop) | exit both legs when the regime turns bullish or no-trade |
+| Exit | hold to expiry (no stop) | exit both legs when Nifty closes above its SMA50 |
 
 Sideways and no-trade regimes: stay out. Two daily closes confirm a regime change. Details and the evidence are in `docs/STRATEGY_SPEC.md`.
 
@@ -36,7 +36,7 @@ data/ outputs/ reports/   local data, generated results and reports (git-ignored
 python -m venv .venv
 .venv\Scripts\activate            # Windows   (Linux/macOS: source .venv/bin/activate)
 pip install -e ".[dev]"
-pytest                            # 48 tests, no network needed
+pytest                            # 55 tests, no network needed
 ```
 
 ## Commands
@@ -45,6 +45,7 @@ pytest                            # 48 tests, no network needed
 otm report                                   # today's report (entry ticket if today is an entry day, exit checks)
 otm report --notify --phase entry            # same, and send the Telegram messages for the entry run
 otm report --today 2026-11-13 --entry-day yes --expiry 2026-11-24    # replay a date / force an entry day (holiday weeks)
+otm report --chain puts.csv                  # use a CSV (strike,type,price) instead of fetching the NSE chain
 otm report --spot 25200                      # compute strikes from a live price instead of the prior close
 otm record --side PE --short 24750 --hedge 24250 --expiry 2026-11-24 --lots 2   # log a position you traded
 otm list

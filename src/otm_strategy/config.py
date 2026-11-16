@@ -17,7 +17,8 @@ class Settings:
     lots: int = 2
     lot_size: int = 65
     step: int = 50
-    put_otm: float = 2.0
+    put_delta: float = 15.0
+    put_otm: float = 2.0  # fallback when no option chain is given
     call_otm: float = 3.0
     hedge_extra: float = 2.0
     rsi_skip: float = 70.0
@@ -33,6 +34,7 @@ class Settings:
             lots=_env("OTM_LOTS", d.lots, int),
             lot_size=_env("OTM_LOT_SIZE", d.lot_size, int),
             step=_env("OTM_STEP", d.step, int),
+            put_delta=_env("OTM_PUT_DELTA", d.put_delta, float),
             put_otm=_env("OTM_PUT_OTM", d.put_otm, float),
             call_otm=_env("OTM_CALL_OTM", d.call_otm, float),
             hedge_extra=_env("OTM_HEDGE_EXTRA", d.hedge_extra, float),

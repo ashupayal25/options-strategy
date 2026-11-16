@@ -3,7 +3,8 @@ from datetime import date, timedelta
 import pandas as pd
 
 from otm_strategy.config import Settings
-from otm_strategy.strategy import (call_exit_hit, first_call_exit, is_entry_day, next_expiry, strikes, symbol)
+from otm_strategy.strategy import (_bs_put, call_exit_hit, delta_put_strikes, first_call_exit, is_entry_day, next_expiry, put_delta,
+                                    strikes, symbol)
 
 CFG = Settings()
 
@@ -65,15 +66,17 @@ def test_next_expiry():
     assert next_expiry(date(2026, 11, 16), 1) == date(2026, 11, 17)
 
 
-def test_call_exit_rule():
-    assert call_exit_hit(prev=-1, cur=1) and call_exit_hit(prev=0, cur=1)
-    assert call_exit_hit(prev=-1, cur=9) and call_exit_hit(prev=0, cur=9)
-    assert not call_exit_hit(prev=-1, cur=-1) and not call_exit_hit(prev=-1, cur=0)
-    assert not call_exit_hit(prev=9, cur=9) and not call_exit_hit(prev=1, cur=1)
+def test_delta_put_strikes_pick_largest_delta_not_above_target():
+    spot, days = 25000.0, 6
+    puts = {k: _bs_put(spot, k, days / 365, 0.14) for k in range(23000, 25000, 50)}
+    short, hedge, dl = delta_put_strikes(puts, spot, days, CFG)
+    assert dl <= 0.15 and put_delta(spot, short + 50, days / 365, puts[short + 50]) > 0.15
+    assert hedge <= short * 0.98 and hedge in puts
 
 
-def test_first_call_exit_finds_the_flip_after_entry():
-    idx = pd.to_datetime(["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-11-02", "2026-11-03", "2026-11-04"])
-    regs = pd.Series([-1, -1, -1, -1, -1, 9, 9], index=idx)
-    assert first_call_exit(regs, date(2026, 10, 28)) == pd.Timestamp("2026-11-03")
-    assert first_call_exit(regs, date(2026, 11, 3)) is None
+def test_first_call_exit_is_first_close_above_sma50_after_entry():
+    idx = pd.to_datetime(["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-11-02", "2026-11-03"])
+    df = pd.DataFrame({"Close": [101, 95, 95, 95, 101, 101], "sma50": [100] * 6}, index=idx)
+    assert first_call_exit(df, date(2026, 10, 28)) == pd.Timestamp("2026-11-02")
+    assert first_call_exit(df, date(2026, 11, 3)) is None
+    assert not call_exit_hit(99, 100)

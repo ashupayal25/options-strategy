@@ -5,6 +5,16 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def no_network_chain(monkeypatch):
+    from otm_strategy import cli
+    from otm_strategy.chain import ChainError
+
+    def offline(expiry):
+        raise ChainError("offline in tests")
+    monkeypatch.setattr(cli, "fetch_put_chain", offline)
+
+
 def make_frames(n=420, drift=0.002, end=date(2026, 11, 13), segments=None, noise=0.002, seed=7):
     """Synthetic daily Nifty and VIX bars (seeded noise). segments: list of (days, daily_drift) to chain trends."""
     segments = segments or [(n, drift)]

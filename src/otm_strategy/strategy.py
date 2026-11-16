@@ -2,6 +2,8 @@
 import math
 from datetime import timedelta
 
+RATE = 0.065
+
 NAMES = {1: "BULLISH", -1: "BEARISH", 0: "SIDEWAYS", 9: "NO TRADE"}
 MONTH_CODE = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"}
 
@@ -53,15 +55,49 @@ def strikes(spot, side, cfg):
     return short, hedge
 
 
-def call_exit_hit(prev, cur):
-    """Call legs exit when the regime turns bullish (from sideways or bearish) or to no-trade."""
-    return (cur == 1 and prev in (0, -1)) or (cur == 9 and prev != 9)
+def _ncdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 
-def first_call_exit(regs, entered):
-    """Date of the first regime change after `entered` that triggers the call exit, or None. regs: Series indexed by date."""
-    for d in regs.index[regs.index.date > entered]:
-        j = regs.index.get_loc(d)
-        if call_exit_hit(int(regs.iloc[j - 1]), int(regs.iloc[j])):
+def _bs_put(spot, k, t, vol):
+    d1 = (math.log(spot / k) + (RATE + vol * vol / 2) * t) / (vol * math.sqrt(t))
+    return k * math.exp(-RATE * t) * _ncdf(-(d1 - vol * math.sqrt(t))) - spot * _ncdf(-d1)
+
+
+def put_delta(spot, k, t, price):
+    """Absolute delta of a put from its price (Black-Scholes implied vol), or None if the price has no implied vol."""
+    if price <= max(k - spot, 0.0) * math.exp(-RATE * t) + 1e-6 or _bs_put(spot, k, t, 3.0) < price:
+        return None
+    lo, hi = 0.01, 3.0
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if _bs_put(spot, k, t, mid) > price else (mid, hi)
+    vol = (lo + hi) / 2
+    return 1 - _ncdf((math.log(spot / k) + (RATE + vol * vol / 2) * t) / (vol * math.sqrt(t)))
+
+
+def delta_put_strikes(puts, spot, days, cfg):
+    """Short = the OTM put with the largest delta not above cfg.put_delta; hedge = listed strike cfg.hedge_extra % beyond it.
+    puts: {strike: price}. Returns (short, hedge, delta) or None when no strike qualifies."""
+    t, best = days / 365.0, None
+    for k, price in puts.items():
+        d = put_delta(spot, k, t, price) if k < spot else None
+        if d is not None and d <= cfg.put_delta / 100 and (best is None or d > best[0]):
+            best = (d, k)
+    if best is None:
+        return None
+    below = [k for k in puts if k <= best[1] * (1 - cfg.hedge_extra / 100)]
+    return (best[1], max(below), best[0]) if below else None
+
+
+def call_exit_hit(close, sma50):
+    """Call legs exit when Nifty closes above its SMA50."""
+    return bool(close > sma50)
+
+
+def first_call_exit(df, entered):
+    """Date of the first close above SMA50 after `entered`, or None. df: regime frame indexed by date."""
+    for d in df.index[df.index.date > entered]:
+        if call_exit_hit(df.Close.loc[d], df.sma50.loc[d]):
             return d
     return None

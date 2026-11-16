@@ -6,8 +6,11 @@ import sys
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from . import positions
 from .config import Settings
+from .chain import fetch_put_chain
 from .data import DataError, load_market
 from .notify import Notifier
 from .report import build_report
@@ -43,6 +46,15 @@ def _notifier_or_warn():
     return n
 
 
+def _load_chain(path):
+    """Put prices from a CSV with columns strike,type,price (type PE/CE; price = last or mid). Returns {strike: price} or None."""
+    if not path:
+        return None
+    d = pd.read_csv(path)
+    d = d[(d["type"].str.upper() == "PE") & (d["price"] > 0)]
+    return dict(zip(d["strike"].astype(float), d["price"].astype(float)))
+
+
 def cmd_report(args, cfg, store):
     today = datetime.strptime(args.today, "%Y-%m-%d").date() if args.today else date.today()
     phase = detect_phase() if args.phase == "auto" else args.phase
@@ -50,7 +62,7 @@ def cmd_report(args, cfg, store):
     try:
         nifty, vix, notes = load_market(store)
         rep = build_report(today, cfg, nifty, vix, positions.load(store), entry_day=args.entry_day,
-                           spot=args.spot, expiry=args.expiry, notes=notes)
+                           spot=args.spot, expiry=args.expiry, put_chain=_load_chain(args.chain), chain_fetcher=fetch_put_chain, notes=notes)
     except Exception as e:
         log.error("report failed: %s: %s", type(e).__name__, str(e)[:300])
         if notifier:
@@ -104,6 +116,7 @@ def build_parser():
     r = sub.add_parser("report", help="daily report: entry ticket on entry days, exit checks for recorded positions")
     r.add_argument("--entry-day", choices=["auto", "yes", "no"], default="auto", help="override entry-day detection (holiday weeks)")
     r.add_argument("--spot", type=float, help="live Nifty price to compute strikes from (default: prior close)")
+    r.add_argument("--chain", help="CSV of option prices (strike,type,price) instead of fetching the NSE chain")
     r.add_argument("--expiry", help="contract expiry YYYY-MM-DD (default: next weekly expiry day)")
     r.add_argument("--today", help="YYYY-MM-DD, for testing")
     r.add_argument("--notify", action="store_true", help="send Telegram messages")

@@ -60,6 +60,12 @@ Decide one entry timing, make the backtest and the Pine script match, and re-run
 
 **Decisions locked for the signal-only app (`otm`, package `src/otm_strategy`):** puts 2% OTM, hedge 2% beyond, skip puts when prior-close RSI > 70, hold puts to expiry (no stop); calls included at 3% OTM, hedge 2% beyond, exit calls on regime change (to bullish or no-trade); 2 closes to confirm a regime; sideways stays out; 2 lots at 65 units; signals from Yahoo (^NSEI, ^INDIAVIX); output to the console, Telegram and `reports/signal_<date>_<time>.txt` (S3 when deployed). The app places no orders. Run at about 9:40 AM on the day after expiry (entry ticket) and about 3:20 PM daily (exit check); record fills with `record`, remove with `close`. `regime_system.pine` defaults now match these decisions: puts hold to expiry (regime exit off), calls exit on regime change, hard kill off, call block off, sideways off, strikes from the prior close with the hedge 2% beyond the short. Open items: walk-forward test of these choices, paper trading, then broker automation.
 
+**Update (delta puts, SMA50 call exit).** Backtested at 25 lots (1,625 units), Rs 16L, 0.5 pt slippage, 2019-02 to 2026-11 (`research/delta_strikes.py`, `delta_25lots.py`, `call_exit_study.py`):
+- Puts: short strike = the put with delta closest to 15 without exceeding it, from implied vols on the option chain (Black-Scholes, r = 6.5%), hedge 2% beyond. Per lot over 90 legs it beat fixed 2% on worst leg and drawdown, and both halves were positive. A flat-VIX delta estimate did not reproduce this, so the app fetches the NSE option chain at the entry run (or reads `--chain`) and falls back to fixed 2% if that fails.
+- Calls: 15-delta calls lost money (-3.2L at 25 lots) and fixed 3% did better. Keep calls at 3% OTM.
+- Call exit: close above SMA50 only. It beat the regime exit and every faster exit tried (SMA20, rally %, distance to short). Adding the regime/no-trade exit on top cost about 14k per lot.
+- 25 lots, 15-delta puts + fixed 3% calls + SMA50 exit: +21.1L (17.4% a year), worst leg -3.0L (19%), max drawdown -4.4L (28%). 59 call legs and about 17 exit variants were tried, so confirm on a walk-forward split. Margin is not modelled.
+
 ## 4. Strike and hedge selection
 
 - **Put short:** floor(spot × (1 − 4%)) to the nearest listed strike step (50). Must be below spot.
@@ -72,7 +78,7 @@ Decide one entry timing, make the backtest and the Pine script match, and re-run
 Primary: regime change (check daily candle ~3:20 PM).
 
 - Put legs: exit when the regime turns bearish or no-trade.
-- Call legs: exit when the regime turns bullish or no-trade.
+- Call legs: exit when Nifty closes above its SMA50 (see the update in section 3).
 - If the regime stays the same and spot has not breached the short, hold to expiry.
 - Close the short and its hedge together.
 
