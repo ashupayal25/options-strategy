@@ -1,76 +1,143 @@
-# Deploy with GitHub Actions (free)
+# Deploy with GitHub Actions (free) — step by step
 
-Runs the signal app on GitHub’s runners — no AWS, no VPS. Two weekday schedules in IST, plus a manual “Run workflow” button for tests. Telegram gets the messages; `state/` in the repo holds positions and the Yahoo cache.
+Your repo: https://github.com/ashupayal25/options-strategy
 
-## 1. Put the repo on GitHub
+Goal: GitHub sends you Telegram signals at **09:40** and **15:20 IST** on weekdays. No AWS.
 
-If it is not there yet:
+Do the steps in order. Stop if a step fails and fix that first.
 
-```bash
-git remote add origin https://github.com/<you>/<repo>.git
-git push -u origin main
+---
+
+## Step 0 — Push this code to GitHub
+
+On your PC, in `C:\workspace\options-strategy`:
+
+```powershell
+git add .github/workflows/otm-signal.yml state/.gitkeep deploy/github-actions.md README.md .env.example .gitignore
+git status
+git commit -m "Add free GitHub Actions signal runner"
+git push origin main
 ```
 
-## 2. Add Telegram secrets
+Open https://github.com/ashupayal25/options-strategy and confirm you can see the folder `.github/workflows/`.
 
-In the GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**
+---
 
-| Name | Value |
+## Step 1 — Create a Telegram bot (if you do not have one)
+
+1. Open Telegram and search for **@BotFather**
+2. Send: `/newbot`
+3. Follow the prompts (name + username)
+4. BotFather replies with a **token** that looks like `123456:ABC-DEF...`
+5. **Copy and save that token** (this is `TELEGRAM_BOT_TOKEN`)
+6. Click the link to open **your** new bot, then send it any message (e.g. `hi`)
+
+---
+
+## Step 2 — Get your Telegram chat id
+
+1. In a browser, open this URL (paste your real token in place of `TOKEN`):
+
+   `https://api.telegram.org/botTOKEN/getUpdates`
+
+   Example: `https://api.telegram.org/bot123456:ABC-DEF/getUpdates`
+
+2. In the page text, find `"chat":{"id":` — the number after it is your chat id  
+   Example: `"chat":{"id":987654321` → chat id is `987654321`
+3. **Copy and save that number** (this is `TELEGRAM_CHAT_ID`)
+
+If the page shows `"result":[]`, go back to your bot chat, send another message, refresh the URL.
+
+---
+
+## Step 3 — Put the two secrets in GitHub
+
+1. Open: https://github.com/ashupayal25/options-strategy/settings/secrets/actions  
+   (Repo → **Settings** → left sidebar **Secrets and variables** → **Actions**)
+2. Click **New repository secret**
+3. Name: `TELEGRAM_BOT_TOKEN`  
+   Secret: paste the bot token → **Add secret**
+4. Click **New repository secret** again
+5. Name: `TELEGRAM_CHAT_ID`  
+   Secret: paste the chat id number → **Add secret**
+
+You should now see both names listed (values stay hidden).
+
+---
+
+## Step 4 — Allow Actions to save state
+
+1. Open: https://github.com/ashupayal25/options-strategy/settings/actions  
+   (Repo → **Settings** → left sidebar **Actions** → **General**)
+2. Scroll to **Workflow permissions**
+3. Select **Read and write permissions**
+4. Click **Save**
+
+---
+
+## Step 5 — Run a test
+
+1. Open: https://github.com/ashupayal25/options-strategy/actions  
+   (Repo → **Actions** tab)
+2. If GitHub asks to enable Actions, click **I understand my workflows, go ahead and enable them**
+3. In the left list, click **OTM signal**
+4. Click **Run workflow** (right side)
+5. Leave branch as `main`
+6. Under **Which run to execute**, choose **`notify-test`**
+7. Click the green **Run workflow**
+8. Wait ~1 minute, then click the new run in the list and open the **signal** job to watch the log
+
+**Pass:** you get a Telegram message saying the test is OK.  
+**Fail:** open the red step in the log — usually a wrong secret name/value.
+
+---
+
+## Step 6 — Optional second test
+
+Same as Step 5, but choose phase **`exit`** (or **`entry`**).  
+You should get today’s report on Telegram (even on a holiday it may say there is nothing to do).
+
+---
+
+## Done — automatic schedule
+
+After Steps 0–5 work, you do not need to click anything on normal days:
+
+| When (IST, Mon–Fri) | What |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | from @BotFather |
-| `TELEGRAM_CHAT_ID` | your chat id |
+| 09:40 | Entry report → Telegram |
+| 15:20 | Exit report → Telegram |
 
-How to get the chat id: message your bot once, then open  
-`https://api.telegram.org/bot<TOKEN>/getUpdates` and read `"chat":{"id": ...}`.
+GitHub can be a few minutes late. That is normal.
 
-## 3. Allow Actions to write state (usually already on)
+---
 
-**Settings → Actions → General → Workflow permissions → Read and write permissions**  
-(needed so the job can commit updates under `state/`).
+## Later: tell the bot about positions you traded
 
-## 4. Smoke test
+Exit alerts only work if positions are in `state/positions.json`.
 
-1. **Actions → OTM signal → Run workflow**
-2. Choose phase **`notify-test`** → Run
-3. You should get a Telegram message within about a minute
+On your PC:
 
-Then try **`entry`** or **`exit`** the same way. Check the job log if anything fails.
-
-## 5. What runs automatically
-
-| IST (Mon–Fri) | Phase | Cron (UTC) |
-|---|---|---|
-| 09:40 | entry | `10 4 * * 1-5` |
-| 15:20 | exit | `50 9 * * 1-5` |
-
-India has no DST, so these stay aligned year-round. Scheduled workflows can be a few minutes late; that is normal for GitHub.
-
-## 6. Recording positions
-
-The exit run only knows positions in `state/positions.json`.
-
-**From your laptop** (with the repo checked out and Telegram secrets in the environment if you also want notify):
-
-```bash
-pip install -e .
-set OTM_STORE=state          # Windows PowerShell: $env:OTM_STORE="state"
+```powershell
+cd C:\workspace\options-strategy
+.\.venv\Scripts\activate
+$env:OTM_STORE = "state"
 otm record --side PE --short 24750 --hedge 24250 --expiry 2026-11-24 --lots 2
-otm list
-otm close --id 1
 git add state/positions.json
-git commit -m "record position"
-git push
+git commit -m "Record PE position"
+git push origin main
 ```
 
-Or edit `state/positions.json` by hand and push. After each Actions run, cache/report files under `state/` may be auto-committed by the workflow.
+To close one: `otm close --id 1` then commit and push again.
 
-## 7. Changing lots / settings
+---
 
-Defaults live in `src/otm_strategy/config.py`. To override in Actions, add `env:` keys under the “Run report” step in `.github/workflows/otm-signal.yml` (for example `OTM_LOTS: "3"`), commit, and push.
+## Troubleshooting
 
-## 8. Things to know
-
-- **Yahoo from cloud IPs:** same risk as AWS. The app retries, then falls back to `state/cache/`. If fetches fail often, we can switch data source later.
-- **Holidays:** the app skips empty exit summaries when the market is closed; still verify entry weeks around NSE holidays.
-- **Private repo:** Actions minutes are free within GitHub’s private-repo quota; two short jobs a day is negligible.
-- **AWS path:** still documented in `deploy/README.md` if you want an Elastic IP later for broker APIs.
+| Problem | Fix |
+|---|---|
+| No **OTM signal** workflow | Step 0 — push was missing; refresh Actions |
+| Secret errors in the log | Step 3 — names must be exact: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| Cannot commit state | Step 4 — Read and write permissions + Save |
+| No Telegram message | Step 1–2 — message the bot first; check chat id |
+| Yahoo / data warnings | App retries then uses `state/cache/`; open the Actions log |
