@@ -1,0 +1,12 @@
+SIGNAL REPORT (no orders are placed)  |  run 2026-11-23 21:44  |  report date 2026-11-23  |  data: Yahoo ^NSEI, ^INDIAVIX
+
+Last completed close: 2026-11-20  Nifty 25,800.6  |  regime BULLISH (previous day BULLISH)
+  ADX 45.1  RSI 78.6  VIX 17.3 (50-day avg 14.5)  SMA50 23,486  SMA200 23,998
+Last 6 regimes: 13-Nov BULL, 16-Nov BULL, 17-Nov BULL, 18-Nov BULL, 19-Nov BULL, 20-Nov BULL
+
+== A. ENTRY TODAY? == no (next entry is the day after the next weekly expiry)
+
+== B. OPEN POSITIONS: EXIT CHECK ==
+No positions recorded.
+
+Notes: the rules were backtested with settlement-price fills, not live fills; paper trade and compare. Not financial advice.
