@@ -1,0 +1,24 @@
+SIGNAL REPORT (no orders are placed)  |  run 2026-11-25 19:38  |  report date 2026-11-25  |  data: Yahoo ^NSEI, ^INDIAVIX
+
+Last completed close: 2026-11-23  Nifty 25,349.7  |  regime BULLISH (previous day BULLISH)
+  ADX 46.4  RSI 67.0  VIX 17.7 (50-day avg 14.6)  SMA50 23,520  SMA200 23,997
+Last 6 regimes: 16-Nov BULL, 17-Nov BULL, 18-Nov BULL, 19-Nov BULL, 20-Nov BULL, 23-Nov BULL
+
+== A. ENTRY TODAY? == YES - today is the day after weekly expiry
+Decision uses the prior close (2026-11-23): regime BULLISH, RSI 67.0. Strikes from spot 25,349.7 (prior close; pass --spot with the live price to recompute)
+Contract expiry used: 2026-12-01 (verify in the option chain; a holiday moves it earlier)
+WARNING: no bar for today yet (holiday or data delay). Confirm the market is open before trading.
+Put strikes use the live spot 25,819.2 from the NSE option chain.
+Put short chosen from the option chain: delta 0.144 (target 0.15), spot 25,819.2, 6 days to expiry
+-> PUT spread (bull put), 2 lots x 65 = 130 units
+   1) BUY  130 NIFTY26D0124700PE   (hedge, margin relief; place first, limit order)
+   2) SELL 130 NIFTY26D0125250PE   (short; place after the hedge fills, limit order)
+   Short is 2.2% from spot, hedge 2.2% beyond the short; width 550.0 points
+   Before placing: check the short strike has open interest and a tight bid-ask, check the basket margin in Kite, and confirm the symbol and expiry in the chain.
+   Exit rule: HOLD TO EXPIRY (no stop). If Nifty closes below the hedge strike the loss is capped at (width - credit) x 130 = about Rs 71,500 before the credit.
+   After you trade, record it:  otm record --side PE --short 25250.0 --hedge 24700.0 --expiry 2026-12-01 --lots 2
+
+== B. OPEN POSITIONS: EXIT CHECK ==
+No positions recorded.
+
+Notes: the rules were backtested with settlement-price fills, not live fills; paper trade and compare. Not financial advice.
